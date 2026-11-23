@@ -1,0 +1,254 @@
+---
+title: "Discussion 11: Reverse Engineering Airbnb's Recommendation System"
+subtitle: "Scenario Design, Search Ranking, and Recommendations for Improvement"
+author: "DATA 607"
+date: "2026-11-22"
+format:
+  html:
+    theme: yeti
+    toc: true
+    toc-location: right
+    toc-title: "Contents"
+    toc-depth: 3
+    number-sections: true
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    fontsize: 1.05em
+    linestretch: 1.65
+    mainfont: "Segoe UI"
+    monofont: "Consolas"
+execute:
+  echo: false
+---
+
+<style>
+:root {
+  --primary: #183153;
+  --accent: #2471a3;
+  --text: #263445;
+  --muted: #64748b;
+  --border: #e2e8f0;
+}
+
+body {
+  background: #ffffff;
+  color: var(--text);
+  font-family: "Segoe UI", Arial, sans-serif;
+}
+
+h1, h2, h3, h4 {
+  color: var(--primary);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  margin-top: 2.3rem;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid var(--border);
+}
+
+h3 {
+  margin-top: 1.6rem;
+  color: #315b82;
+}
+
+p, li {
+  line-height: 1.75;
+}
+
+#title-block-header {
+  padding: 2rem 0 1.5rem;
+  margin-bottom: 2rem;
+  border-bottom: 2px solid var(--primary);
+}
+
+.quarto-title .title {
+  color: var(--primary);
+  font-size: 2.35rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.quarto-title .subtitle {
+  color: var(--muted);
+  font-size: 1.1rem;
+  font-weight: 400;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+thead {
+  background-color: #f1f5f9;
+}
+
+th, td {
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+blockquote {
+  border-left: 3px solid var(--accent);
+  background: #f8fafc;
+  padding: 1rem 1.25rem;
+  border-radius: 0 6px 6px 0;
+}
+
+#TOC a {
+  color: #475569;
+}
+
+#TOC a.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+a {
+  color: #21618c;
+}
+
+main {
+  padding-bottom: 3rem;
+}
+</style>
+
+# Introduction
+
+For this assignment, I chose **Airbnb**, a marketplace where travelers search for places to stay and hosts offer their properties. Unlike a movie or music recommender, Airbnb must recommend something that is available on specific dates, fits a traveler's budget and group size, and can be booked successfully. A recommendation that looks appealing but is unavailable or has unexpected costs is not useful.
+
+I apply Bruce Temkin's three-question Scenario Design framework twice: first for guests and then for Airbnb and its hosts. I then reverse engineer the recommendation system using Airbnb's published explanations and engineering research, before proposing improvements. This is a research-based analysis, not an audit of Airbnb's private source code or a controlled experiment with live user accounts.
+
+# Scenario Design
+
+Temkin's framework asks: **Who are the target users? What are their key goals? How can we help them accomplish those goals?** Asking these questions separately for travelers and the marketplace highlights where their interests align and where they may conflict.
+
+## Scenario A: The guest's perspective
+
+**Who are the target users?** Guests include solo travelers, families, groups of friends, business travelers, and people booking longer stays. Their needs differ considerably. A family may prioritize multiple bedrooms, kitchen access, and reliable reviews, while a solo traveler may care more about price and proximity to public transportation.
+
+**What are their key goals?** Guests want to find a trustworthy, available property that meets their trip requirements without spending hours comparing listings. They also want to understand the **total cost**, the location, cancellation terms, amenities, and potential trade-offs before committing to a booking.
+
+**How can Airbnb help?** The recommender should first respect nonnegotiable constraints such as dates, guest count, and price limits. It should then rank eligible properties based on relevance, reliability, value, and personal preferences. Explanations such as “matches your dates and budget” or “similar to homes you saved” could help guests understand why a listing appears.
+
+## Scenario B: Airbnb's and hosts' perspective
+
+**Who are the target users?** From the platform's perspective, there are two connected customer groups: guests who book and hosts who supply available accommodations. Airbnb also needs to maintain a trustworthy marketplace.
+
+**What are their key goals?** Airbnb benefits when guests find suitable stays, complete bookings, and return for future trips. Hosts want qualified exposure, dependable guests, and reservations that make hosting worthwhile. Both sides benefit from fewer cancellations and fewer mismatches between expectations and the actual stay.
+
+**How can Airbnb help?** The ranking system can prioritize relevant, bookable listings while accounting for quality, host reliability, and guest satisfaction. It should also provide fair opportunities for newer listings to be discovered instead of relying only on past popularity.
+
+## Where the goals align and conflict
+
+| Question | Guest priority | Platform/host priority | Design tension |
+|---|---|---|---|
+| What should appear first? | Best fit and value | Listings likely to convert | Booking probability may not capture every guest preference |
+| How should price matter? | Predictable total trip cost | Competitive pricing and earnings | A low nightly price can obscure a higher final total |
+| How should quality be measured? | Trustworthy, recent evidence | Reviews, reliability, and successful stays | Established listings have more historical signals |
+| How much personalization? | Relevant results for this trip | Learn from prior engagement | An old trip may not reflect current needs |
+
+The key design principle is that a **successful recommendation is not just a click**. It is a stay that fits the guest's actual needs and creates a positive outcome for both guest and host.
+
+# Reverse Engineering Airbnb's Recommender
+
+## What Airbnb publicly confirms
+
+Airbnb states that search ranking considers guest search parameters (including destination, dates, party size, and price), listing characteristics (including location, availability, photos, ratings, and reviews), host and listing requirements, guest experience, and a guest's previous activity, such as viewed and saved listings [1]. Airbnb's hosting guidance also identifies price, quality, and popularity as important ranking influences and notes that page views, wish lists, bookings, and availability can matter [2].
+
+Airbnb separately describes several recommendation surfaces: homepage suggestions, search results, suggested destinations, and review ordering [3]. This means there is not necessarily one universal algorithm producing every recommendation on the site.
+
+These disclosures support the conclusion that Airbnb uses a **context-aware, personalized ranking system** rather than simply displaying properties in alphabetical order or by average star rating.
+
+## A plausible recommendation pipeline
+
+A simplified conceptual pipeline is:
+
+1. **Understand the trip.** Read destination, dates, number of guests, price range, and selected filters.
+2. **Retrieve eligible listings.** Find homes that meet essential constraints and are reasonable candidates for the search.
+3. **Estimate relevance.** Combine property attributes, quality signals, past guest behavior, and the current search context.
+4. **Rank the candidates.** Place the most promising options higher while considering trade-offs between fit, value, and reliability.
+5. **Learn from outcomes.** Use later interactions, bookings, and other feedback to improve future predictions.
+
+This sequence is an analytical simplification, not a claim that Airbnb uses precisely these five steps in every product surface. However, Airbnb Engineering has documented an **embedding-based retrieval** system that narrows the pool of eligible homes before more computationally expensive ranking models score candidates [4]. That supports the broad retrieval-then-ranking interpretation.
+
+## Connection to Chapter 9: Content-based and collaborative signals
+
+Chapter 9 of *Mining of Massive Datasets* distinguishes **content-based recommendation**, which uses item features, from **collaborative filtering**, which uses relationships among users and items [6]. Airbnb has obvious content-based features: bedrooms, amenities, location, price, property type, and review information. For example, a search for a family stay with a kitchen should favor listings that actually offer that amenity.
+
+Behavioral signals also matter. Airbnb says previous trips, viewed listings, and saved listings can influence results [1]. These signals are consistent with the broader idea of learning from user-item interactions. However, **the presence of behavioral personalization does not by itself prove that Airbnb's current system uses a particular textbook collaborative-filtering algorithm**. Its documented machine-learning systems are more sophisticated than a simple user-user similarity matrix.
+
+The chapter's **long-tail** concept is also relevant. Airbnb can surface specialized properties that would be difficult to discover in a conventional catalog. Good recommendations should help travelers find less-popular but suitable options, not only the properties with the most bookings.
+
+## What Airbnb's engineering research reveals
+
+Airbnb Engineering describes using learned embeddings to retrieve relevant listings efficiently [4]. More recently, it published work on **guest-journey sequence modeling**, using a Transformer-based encoder to learn from the order of guest interactions and combine that representation with the current search query [5]. Its engineering article also describes storing guest representations from batch processing and using them for real-time ranking, rather than recomputing an entire history during each search.
+
+This matters because a traveler's behavior can change between trips. Someone who previously booked a small city apartment may now be searching for a large house for a family vacation. A model that considers both long-term history and recent browsing has a better chance of distinguishing enduring preferences from current-trip needs.
+
+Airbnb reports improvements in ranking metrics and booking-related outcomes from its sequence-modeling work [5]. Those results are **company-reported findings**, not independently reproduced results for this assignment.
+
+## What remains unknown
+
+Airbnb does not publicly disclose the exact weights assigned to all ranking features, the complete live model architecture for every interface, or the full decision process for any individual search result. We also cannot establish from documentation alone whether a particular guest sees a given listing because of its price, similarity to past bookings, host quality, or some combination. Therefore, the analysis above separates Airbnb's documented claims from my simplified interpretation.
+
+# Recommendations for Improvement
+
+## 1. Add a trip-specific personalization reset
+
+**Problem:** Historical bookings can be useful, but travelers take different types of trips. A person who usually books inexpensive solo stays may be planning a family reunion.
+
+**Proposal:** Offer an optional “New type of trip” mode that temporarily reduces the influence of older booking and browsing patterns while preserving explicit filters.
+
+**How to evaluate:** Compare search reformulations, time to first suitable saved listing, completed bookings, and post-stay satisfaction against the existing experience.
+
+## 2. Explain recommendations in practical language
+
+**Problem:** A guest may not know why one home ranks above another.
+
+**Proposal:** Show short, accurate explanations tied to supported factors, such as “fits your dates and guest count,” “similar to homes you saved,” or “high ratings for cleanliness.” Avoid claiming a specific cause unless the ranking system can substantiate it.
+
+**How to evaluate:** Measure whether users understand the explanations, make fewer unnecessary filter changes, and report greater confidence in their choices.
+
+## 3. Let guests prioritize trade-offs explicitly
+
+**Problem:** Different trips call for different priorities. Some guests value the lowest total price; others value location, flexibility, or reliability.
+
+**Proposal:** Provide a simple preference control for **value**, **location**, **flexibility**, or **guest-rated quality**, while keeping hard constraints intact. The interface should make clear that changing priorities can change the ranking.
+
+**How to evaluate:** Measure successful booking rate, search abandonment, and satisfaction by trip type rather than relying only on clicks.
+
+## 4. Give promising new listings a fairer discovery path
+
+**Problem:** Popularity and historical bookings are informative, but newer listings have less data. This is a classic cold-start challenge.
+
+**Proposal:** Reserve a small, carefully evaluated share of relevant search exposure for new listings that meet baseline quality, availability, and trust requirements. Do not sacrifice guest safety or essential search constraints.
+
+**How to evaluate:** Track exposure across new and established listings, conversion after impressions, cancellations, and quality complaints. A good result would improve discovery without reducing booking reliability.
+
+## 5. Optimize for completed, satisfactory stays not clicks alone
+
+**Problem:** A listing may attract attention through attractive photos but still produce disappointing stays.
+
+**Proposal:** Evaluate ranking changes with longer-term signals, including uncanceled bookings, review quality, support issues, and repeat use. Keep these metrics balanced so the system does not unfairly penalize listings for factors outside hosts' control.
+
+**How to evaluate:** Run controlled A/B tests and examine both guest and host outcomes. A higher click-through rate should not count as success if cancellations or negative experiences increase.
+
+# Conclusion
+
+Airbnb illustrates why recommendation systems are not simply about finding similar items. A good match depends on a specific trip, the availability and quality of a real property, and the needs of two sides of a marketplace. Scenario Design shows that guests want confidence, value, and convenience, while Airbnb and hosts need successful bookings and a healthy marketplace.
+
+Airbnb's public documentation and engineering research indicate that its recommendation capabilities combine explicit search constraints, listing information, guest behavior, and machine-learning retrieval and ranking. The most useful next steps would give guests more control over the current trip, make recommendations easier to understand, support discovery of new listings, and evaluate success using actual stay outcomes. These changes would keep the system focused on helping travelers find the **right** stay rather than simply the most clickable listing.
+
+# References
+
+1. Airbnb. (n.d.). *Terms of Service*, Section 5.3, Search Ranking. https://www.airbnb.com/help/article/2908
+2. Airbnb. (2022, updated November 21). *How search works on Airbnb*. https://www.airbnb.com/resources/hosting-homes/a/how-search-works-on-airbnb-460
+3. Airbnb. (n.d.). *Airbnb's recommendation systems*. https://www.airbnb.com/help/article/4083
+4. Airbnb Engineering & Data Science. (n.d.). *Embedding-Based Retrieval for Airbnb Search*. https://airbnb.tech/ai-ml/embedding-based-retrieval-for-airbnb-search/
+5. Zha, D., et al. (2026). *Personalizing Airbnb search by learning from the guest journey*. Airbnb Engineering & Data Science. https://airbnb.tech/ai-ml/personalizing-airbnb-search-by-learning-from-the-guest-journey/
+6. Leskovec, J., Rajaraman, A., & Ullman, J. D. *Mining of Massive Datasets*, Chapter 9: Recommendation Systems. Assigned course reading.
+7. Temkin, B. D. (2004). *Scenario Design: A Disciplined Approach to Customer Experience*. Forrester Research. Framework provided in the assignment instructions.
